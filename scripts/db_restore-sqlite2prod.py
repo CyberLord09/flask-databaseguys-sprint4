@@ -34,6 +34,9 @@ import sys
 # Add the directory containing main.py to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# Import app BEFORE using app.config
+from main import app, db
+
 # Configuration
 BASE_URL = "https://flask.opencodingsociety.com"
 PROD_AUTH_URL = f"{BASE_URL}/api/authenticate"
@@ -58,44 +61,28 @@ IMPORT_ENDPOINTS = {
 UID = app.config['ADMIN_UID']
 PASSWORD = app.config['ADMIN_PASSWORD']
 
-# Import app config for default data filtering
-try:
-    from main import app
-    
-    # Default data to EXCLUDE from restore (created by initUsers, init_posts, etc.)
-    DEFAULT_DATA = {
-        'users': [
-            app.config.get('ADMIN_UID', 'admin'),
-            app.config.get('DEFAULT_UID', 'user'),
-            'niko',  # Nicholas Tesla test user
-        ],
-        'sections': [
-            'CSA',      # Computer Science A
-            'CSP',      # Computer Science Principles
-            'Robotics', # Engineering Robotics
-            'CSSE',     # Computer Science and Software Engineering
-        ],
-        'topics': [
-            '/lessons/flask-introduction',
-            '/hacks/javascript-basics',
-            '/projects/portfolio-showcase',
-            '/general/daily-standup',
-            '/resources/study-materials',
-        ],
-    }
-except:
-    # Fallback if app import fails
-    DEFAULT_DATA = {
-        'users': ['admin', 'user', 'niko', 'toby', 'hop'],
-        'sections': ['CSA', 'CSP', 'Robotics', 'CSSE'],
-        'topics': [
-            '/lessons/flask-introduction',
-            '/hacks/javascript-basics',
-            '/projects/portfolio-showcase',
-            '/general/daily-standup',
-            '/resources/study-materials',
-        ],
-    }
+# Default data to EXCLUDE from restore (created by initUsers, init_posts, etc.)
+# These are recreated when db.create_all() runs, so we don't want duplicates
+DEFAULT_DATA = {
+    'users': [
+        app.config.get('ADMIN_UID', 'admin'),
+        app.config.get('DEFAULT_UID', 'user'),
+        'niko',  # Nicholas Tesla test user
+    ],
+    'sections': [
+        'CSA',      # Computer Science A
+        'CSP',      # Computer Science Principles
+        'Robotics', # Engineering Robotics
+        'CSSE',     # Computer Science and Software Engineering
+    ],
+    'topics': [
+        '/lessons/flask-introduction',
+        '/hacks/javascript-basics',
+        '/projects/portfolio-showcase',
+        '/general/daily-standup',
+        '/resources/study-materials',
+    ],
+}
 
 
 def authenticate(uid, password):
@@ -324,7 +311,7 @@ def filter_default_data(all_data):
 def import_all_data(all_data, cookies):
     """
     Import all data to production using chunked endpoints (one per data type).
-    This avoids timeout issues by making multiple smaller requests.
+    For large datasets (users), breaks into smaller batches to avoid timeout.
     """
     headers = {
         "Content-Type": "application/json",
@@ -332,7 +319,7 @@ def import_all_data(all_data, cookies):
     }
 
     print("  Using chunked import endpoints (one per data type)...")
-    
+
     results = {}
     total_imported = 0
     total_failed = 0
@@ -341,58 +328,115 @@ def import_all_data(all_data, cookies):
     for data_type, endpoint in IMPORT_ENDPOINTS.items():
         # Get data for this type
         data_list = all_data.get(data_type, [])
-        
+
         # Skip if no data for this type
         if not data_list:
             print(f"  Skipping {data_type}: no data")
             continue
 
         url = BASE_URL + endpoint
-        print(f"  Uploading {data_type} ({len(data_list)} records)...", end=" ")
 
-        try:
-            # Send data wrapped in the expected key
-            payload = {data_type: data_list}
-            response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=120)
+        # For large datasets, use batching to avoid timeout
+        # Batch size of 50 matches the pagination size for consistency
+        large_datasets = ['users', 'microblogs', 'posts', 'user_personas', 'personas']
+        batch_size = 50 if data_type in large_datasets else None
 
-            if response.status_code in [200, 201]:
-                result = response.json()
-                
-                # Extract stats from response
-                stats = result.get(data_type, {})
-                imported = stats.get('imported', 0)
-                failed = stats.get('failed', 0)
-                errors = stats.get('errors', [])
+        if batch_size and len(data_list) > batch_size:
+            # Upload in batches
+            print(f"  Uploading {data_type} ({len(data_list)} records in batches of {batch_size})...")
 
-                results[data_type] = stats
-                total_imported += imported
-                total_failed += failed
+            combined_stats = {'imported': 0, 'failed': 0, 'errors': []}
+            batches = [data_list[i:i+batch_size] for i in range(0, len(data_list), batch_size)]
 
-                status = "✓" if failed == 0 else "⚠"
-                print(f"{status} {imported} imported, {failed} failed")
+            for i, batch in enumerate(batches, 1):
+                print(f"    Batch {i}/{len(batches)} ({len(batch)} records)...", end=" ", flush=True)
 
-                # Show first few errors if any
-                if errors:
-                    for error in errors[:3]:
-                        print(f"      - {error}")
-                    if len(errors) > 3:
-                        print(f"      ... and {len(errors) - 3} more errors")
-            else:
-                print(f"✗ Error {response.status_code}")
-                failed_endpoints.append((data_type, f"Status {response.status_code}"))
-                results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': [f"HTTP {response.status_code}"]}
+                try:
+                    payload = {data_type: batch}
+                    response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=180)
+
+                    if response.status_code in [200, 201]:
+                        result = response.json()
+                        stats = result.get(data_type, {})
+                        combined_stats['imported'] += stats.get('imported', 0)
+                        combined_stats['failed'] += stats.get('failed', 0)
+                        combined_stats['errors'].extend(stats.get('errors', []))
+
+                        status = "✓" if stats.get('failed', 0) == 0 else "⚠"
+                        print(f"{status} {stats.get('imported', 0)} imported, {stats.get('failed', 0)} failed")
+                    else:
+                        print(f"✗ Error {response.status_code}")
+                        combined_stats['failed'] += len(batch)
+                        combined_stats['errors'].append(f"Batch {i} HTTP {response.status_code}")
+
+                except requests.Timeout:
+                    print(f"✗ Timeout")
+                    combined_stats['failed'] += len(batch)
+                    combined_stats['errors'].append(f"Batch {i} timeout")
+                except requests.RequestException as e:
+                    print(f"✗ Error: {str(e)[:50]}")
+                    combined_stats['failed'] += len(batch)
+                    combined_stats['errors'].append(f"Batch {i}: {str(e)[:50]}")
+
+            results[data_type] = combined_stats
+            total_imported += combined_stats['imported']
+            total_failed += combined_stats['failed']
+
+            # Show summary
+            print(f"    Total: {combined_stats['imported']} imported, {combined_stats['failed']} failed")
+            if combined_stats['errors'][:3]:
+                for error in combined_stats['errors'][:3]:
+                    print(f"      - {error}")
+                if len(combined_stats['errors']) > 3:
+                    print(f"      ... and {len(combined_stats['errors']) - 3} more errors")
+
+        else:
+            # Regular single-request upload
+            print(f"  Uploading {data_type} ({len(data_list)} records)...", end=" ", flush=True)
+
+            try:
+                # Send data wrapped in the expected key
+                payload = {data_type: data_list}
+                response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=180)
+
+                if response.status_code in [200, 201]:
+                    result = response.json()
+
+                    # Extract stats from response
+                    stats = result.get(data_type, {})
+                    imported = stats.get('imported', 0)
+                    failed = stats.get('failed', 0)
+                    errors = stats.get('errors', [])
+
+                    results[data_type] = stats
+                    total_imported += imported
+                    total_failed += failed
+
+                    status = "✓" if failed == 0 else "⚠"
+                    print(f"{status} {imported} imported, {failed} failed")
+
+                    # Show first few errors if any
+                    if errors:
+                        for error in errors[:3]:
+                            print(f"      - {error}")
+                        if len(errors) > 3:
+                            print(f"      ... and {len(errors) - 3} more errors")
+                else:
+                    print(f"✗ Error {response.status_code}")
+                    failed_endpoints.append((data_type, f"Status {response.status_code}"))
+                    results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': [f"HTTP {response.status_code}"]}
+                    total_failed += len(data_list)
+
+            except requests.Timeout:
+                print(f"✗ Timeout")
+                failed_endpoints.append((data_type, "Request timeout"))
+                results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': ["Timeout"]}
                 total_failed += len(data_list)
-
-        except requests.Timeout:
-            print(f"✗ Timeout")
-            failed_endpoints.append((data_type, "Request timeout"))
-            results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': ["Timeout"]}
-            total_failed += len(data_list)
-        except requests.RequestException as e:
-            print(f"✗ Error: {e}")
-            failed_endpoints.append((data_type, str(e)))
-            results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': [str(e)]}
-            total_failed += len(data_list)
+            except requests.RequestException as e:
+                print(f"✗ Error: {e}")
+                failed_endpoints.append((data_type, str(e)))
+                results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': [str(e)]}
+                total_failed += len(data_list)
 
     print(f"\n  Total: {total_imported} imported, {total_failed} failed")
 

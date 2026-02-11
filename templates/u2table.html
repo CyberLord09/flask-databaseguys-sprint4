@@ -69,7 +69,8 @@
         const table =  $("#userTable").DataTable(); // repersents table
 
         table.page.len(-1).draw();  // shows all users and commits
-        // Function to fetch commits
+        // Function to fetch commits (DISABLED)
+        /*
         async function fetchAdminData(userUid) {
             const commitsElement = $(`#commits-${userUid}`);
 
@@ -98,12 +99,13 @@
                 console.error("Error:", error);
             }
         }
+        */
 
-        // Batch processing with delay
+        // Batch processing with delay (DISABLED)
+        /*
         async function processUsersWithDelay() {
             const users = $("[id^='commits-']");
             console.log(`Total users found: ${users.length}`);
-
 
             for (let i = 0; i < users.length; i++) {
                 const userUid = users[i].id.split("-")[1];
@@ -121,9 +123,10 @@
 
             table.page.len(10).draw();  
         }
+        */
 
-        // Start processing users with a delay yep
-        processUsersWithDelay();
+        // Start processing users with a delay (DISABLED)
+        // processUsersWithDelay();
 
         // Handle delete action
         document.querySelectorAll(".delete-btn").forEach(button => {

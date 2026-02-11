@@ -22,6 +22,7 @@ import os
 import requests
 import subprocess
 import json
+import time
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
@@ -147,11 +148,12 @@ def authenticate(uid, password):
 
 # Extract ALL data from production using chunked endpoints (one per data type)
 def extract_all_data(cookies):
-    '''Extract all data using chunked endpoints to avoid timeout.
+    '''Extract all data using paginated endpoints to avoid timeout.
 
-    Calls each endpoint in EXPORT_ENDPOINTS sequentially and aggregates results.
+    All endpoints now use pagination with 50 records per page.
+    This ensures consistent, predictable performance regardless of dataset size.
     '''
-    print("  Using chunked export endpoints (one per data type)...")
+    print("  Using paginated export endpoints (50 records per page)...")
 
     headers = {
         "Content-Type": "application/json",
@@ -162,41 +164,118 @@ def extract_all_data(cookies):
     total_records = 0
     failed_endpoints = []
 
+    # Data types that need pagination (large datasets)
+    paginated_types = ['users', 'microblogs', 'posts', 'topics', 'personas', 'user_personas']
+
     for data_type, endpoint in EXPORT_ENDPOINTS.items():
         url = BASE_URL + endpoint
-        print(f"  Fetching {data_type}...", end=" ")
+        print(f"  Fetching {data_type}...", end=" ", flush=True)
 
         try:
-            response = requests.get(url, headers=headers, cookies=cookies, timeout=120)
+            # Use pagination for data types that can be large
+            if data_type in paginated_types:
+                all_records = []
+                page = 1
+                per_page = 50
+                max_retries = 3
 
-            if response.status_code not in [200, 201]:
-                error_msg = f"HTTP {response.status_code}"
-                try:
-                    error_data = response.json()
-                    if 'message' in error_data:
-                        error_msg += f": {error_data['message']}"
-                except:
-                    error_msg += f": {response.text[:100]}"
+                while True:
+                    paginated_url = f"{url}?page={page}&per_page={per_page}"
+                    retry_count = 0
+                    success = False
 
-                print(f"FAILED ({error_msg})")
-                failed_endpoints.append((data_type, error_msg))
-                continue
+                    # Retry logic for failed requests
+                    while retry_count < max_retries and not success:
+                        try:
+                            response = requests.get(paginated_url, headers=headers, cookies=cookies, timeout=180)
 
-            result = response.json()
+                            if response.status_code not in [200, 201]:
+                                error_msg = f"HTTP {response.status_code}"
+                                try:
+                                    error_data = response.json()
+                                    if 'message' in error_data:
+                                        error_msg += f": {error_data['message']}"
+                                except:
+                                    error_msg += f": {response.text[:100]}"
 
-            # Each chunked endpoint returns {data_type: [...], count: N}
-            # Extract the data array
-            if data_type in result:
-                records = result[data_type]
-                all_data[data_type] = records
-                count = len(records) if isinstance(records, list) else 1
-                total_records += count
-                print(f"{count} records")
+                                # Retry on 504 (Gateway Timeout)
+                                if response.status_code == 504:
+                                    retry_count += 1
+                                    if retry_count < max_retries:
+                                        print(f"R", end="", flush=True)  # R for retry
+                                        time.sleep(2)
+                                        continue
+
+                                print(f"\nFAILED on page {page} ({error_msg})")
+                                failed_endpoints.append((data_type, error_msg))
+                                break
+
+                            result = response.json()
+                            page_records = result.get(data_type, [])
+         
+                            # Safety check: stop if no records returned
+                            if len(page_records) == 0:
+                                break
+         
+                            all_records.extend(page_records)
+                            success = True
+
+                            # Print progress dot
+                            print(f".", end="", flush=True)
+
+                            # Check if there are more pages
+                            if not result.get('has_next', False):
+                                break
+
+                        except requests.Timeout:
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                print(f"T", end="", flush=True)  # T for timeout retry
+                                time.sleep(2)
+                                continue
+                            else:
+                                print(f"\nTIMEOUT on page {page} after {max_retries} retries")
+                                failed_endpoints.append((data_type, "Request timed out"))
+                                break
+
+                        except requests.RequestException as e:
+                            print(f"\nERROR on page {page}: {str(e)[:50]}")
+                            failed_endpoints.append((data_type, str(e)))
+                            break
+
+                    if not success:
+                        break
+
+                    page += 1
+
+                all_data[data_type] = all_records
+                total_records += len(all_records)
+                print(f" {len(all_records)} records ({page} page(s))")
+
             else:
-                # Fallback: maybe the response is the array directly
-                if isinstance(result, list):
-                    all_data[data_type] = result
-                    count = len(result)
+                # Regular single-request fetch for small datasets (sections, classrooms, feedback, study)
+                response = requests.get(url, headers=headers, cookies=cookies, timeout=120)
+
+                if response.status_code not in [200, 201]:
+                    error_msg = f"HTTP {response.status_code}"
+                    try:
+                        error_data = response.json()
+                        if 'message' in error_data:
+                            error_msg += f": {error_data['message']}"
+                    except:
+                        error_msg += f": {response.text[:100]}"
+
+                    print(f"FAILED ({error_msg})")
+                    failed_endpoints.append((data_type, error_msg))
+                    continue
+
+                result = response.json()
+
+                # Extract the data array
+                if data_type in result:
+                    records = result[data_type]
+                    all_data[data_type] = records
+                    count = len(records) if isinstance(records, list) else 1
                     total_records += count
                     print(f"{count} records")
                 else:
@@ -858,6 +937,12 @@ def main():
     print("\n=== Data extraction complete ===")
     if not all_data:
         print("Error: No data was extracted!")
+        sys.exit(1)
+
+    # Validate that all_data is a dictionary
+    if not isinstance(all_data, dict):
+        print(f"Error: Expected dictionary but got {type(all_data).__name__}")
+        print("The JSON backup file may be in an incompatible format.")
         sys.exit(1)
 
     for key, data in all_data.items():

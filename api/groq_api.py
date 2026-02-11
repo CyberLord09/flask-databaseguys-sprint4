@@ -6,7 +6,9 @@ Groq is a FREE and FAST AI inference API that uses LLaMA models.
 
 SETUP REQUIRED:
 1. Get a free API key from: https://console.groq.com/keys
-2. Add to your .env file: GROQ_API_KEY=your_key_here
+2. Add to your .env file:
+   GROQ_API_KEY=your_key_here
+   GROQ_SERVER=https://api.groq.com/openai/v1/chat/completions
 
 ENDPOINTS PROVIDED:
 - POST /api/groq              - General chat completions (original endpoint)

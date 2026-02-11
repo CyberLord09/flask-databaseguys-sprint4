@@ -90,7 +90,9 @@ def ai_npc_prompt():
         ai_response = call_gemini_api(system_prompt, prompt, conversation_history[session_id])
 
         if not ai_response:
-            ai_response = "I'm having trouble thinking right now. Please try again."
+            # Use fallback if API failed (quota exceeded, no key, etc)
+            print("[DEBUG] Gemini API failed, using fallback response")
+            ai_response = generate_fallback_response(prompt, npc_type)
 
         # Store in history
         conversation_history[session_id].append({"role": "user", "content": prompt})
@@ -252,6 +254,9 @@ def call_gemini_api(system_prompt, user_message, history):
                         print(f"[DEBUG] Parse error with {model}: {str(e)}")
                         print(f"[DEBUG] Response structure: {result}")
                         continue
+                elif response.status_code == 429:
+                    print(f"[DEBUG] {model} returned 429 - Quota exceeded. Using fallback.")
+                    return None  # Signal to use fallback
                 else:
                     print(f"[DEBUG] {model} returned {response.status_code}")
                     print(f"[DEBUG] Response: {response.text[:500]}")

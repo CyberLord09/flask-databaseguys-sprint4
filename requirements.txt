@@ -17,7 +17,4 @@ pymysql
 psycopg2-binary
 python_dotenv
 boto3
-opencv-python-headless
 deepface
-tensorflow
-tf-keras

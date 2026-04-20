@@ -1,0 +1,9 @@
+version: "3.8"
+services:
+  websocket:
+    image: websocket_open
+    build:
+      context: .
+    ports:
+      - "8590:8590"
+    restart: unless-stopped

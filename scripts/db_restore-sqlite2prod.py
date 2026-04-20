@@ -2,129 +2,59 @@
 
 """
 db_restore-sqlite2prod.py
-Restores ALL data from local SQLite database to production database via API endpoints.
+Restores ALL data from the local SQLite database to the production database
+via API endpoints.
 
-This script reads directly from the active database (instance/volumes/user_management.db)
-and uploads all data types:
-- Sections
-- Users (with section associations)
-- Topics (microblog categories)
-- Microblogs
-- Posts
-- Classrooms
-- Feedback
-- Study tracker records
-- Personas
-- User-Persona associations
+Responsibility: read local data → filter defaults → upload to production.
 
-If database reading fails, it falls back to instance/data.json.
+Data types uploaded (in dependency order):
+  Sections, Users, Topics, Microblogs, Posts, Classrooms,
+  Feedback, Study, Personas, User-Persona associations.
 
-Usage: Run from the terminal as such:
-> ./scripts/db_restore-sqlite2prod.py
+Falls back to instance/data.json if the local database cannot be read.
 
-Or run from the root of the project:
-> python scripts/db_restore-sqlite2prod.py
+Usage:
+  python scripts/db_restore-sqlite2prod.py
+  ./scripts/db_restore-sqlite2prod.py
 """
 
-import requests
 import json
 import os
 import sys
 
-# Add the directory containing main.py to the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import requests
 
-# Configuration
-BASE_URL = "https://flask.opencodingsociety.com"
-PROD_AUTH_URL = f"{BASE_URL}/api/authenticate"
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from main import app, db
+from db_utils import authenticate, filter_default_data, BASE_URL, UID, PASSWORD
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
 LOCAL_JSON = "instance/data.json"
 
-# API Endpoints for chunked data import (one per data type)
-# Order matters: sections and users must be imported first as other data depends on them
+# Import endpoints (order matters: sections and users first)
 IMPORT_ENDPOINTS = {
-    'sections': '/api/export/import/sections',
-    'users': '/api/export/import/users',
-    'topics': '/api/export/import/topics',
-    'microblogs': '/api/export/import/microblogs',
-    'posts': '/api/export/import/posts',
-    'classrooms': '/api/export/import/classrooms',
-    'feedback': '/api/export/import/feedback',
-    'study': '/api/export/import/study',
-    'personas': '/api/export/import/personas',
-    'user_personas': '/api/export/import/user_personas',
+    'sections':     '/api/export/import/sections',
+    'users':        '/api/export/import/users',
+    'topics':       '/api/export/import/topics',
+    'microblogs':   '/api/export/import/microblogs',
+    'posts':        '/api/export/import/posts',
+    'classrooms':   '/api/export/import/classrooms',
+    'feedback':     '/api/export/import/feedback',
+    'study':        '/api/export/import/study',
+    'personas':     '/api/export/import/personas',
+    'user_personas':'/api/export/import/user_personas',
 }
 
-# Hardcoded credentials for production authentication
-UID = app.config['ADMIN_UID']
-PASSWORD = app.config['ADMIN_PASSWORD']
+# Data types large enough to need batched uploads
+LARGE_DATA_TYPES = {'users', 'microblogs', 'posts', 'user_personas', 'personas'}
+BATCH_SIZE = 50
 
-# Import app config for default data filtering
-try:
-    from main import app
-    
-    # Default data to EXCLUDE from restore (created by initUsers, init_posts, etc.)
-    DEFAULT_DATA = {
-        'users': [
-            app.config.get('ADMIN_UID', 'admin'),
-            app.config.get('DEFAULT_UID', 'user'),
-            'niko',  # Nicholas Tesla test user
-        ],
-        'sections': [
-            'CSA',      # Computer Science A
-            'CSP',      # Computer Science Principles
-            'Robotics', # Engineering Robotics
-            'CSSE',     # Computer Science and Software Engineering
-        ],
-        'topics': [
-            '/lessons/flask-introduction',
-            '/hacks/javascript-basics',
-            '/projects/portfolio-showcase',
-            '/general/daily-standup',
-            '/resources/study-materials',
-        ],
-    }
-except:
-    # Fallback if app import fails
-    DEFAULT_DATA = {
-        'users': ['admin', 'user', 'niko', 'toby', 'hop'],
-        'sections': ['CSA', 'CSP', 'Robotics', 'CSSE'],
-        'topics': [
-            '/lessons/flask-introduction',
-            '/hacks/javascript-basics',
-            '/projects/portfolio-showcase',
-            '/general/daily-standup',
-            '/resources/study-materials',
-        ],
-    }
-
-
-def authenticate(uid, password):
-    """Authenticate to production server and return session cookies."""
-    auth_data = {"uid": uid, "password": password}
-    headers = {
-        "Content-Type": "application/json",
-        "X-Origin": "client"
-    }
-    
-    print(f"  Authenticating as: {uid}")
-    
-    try:
-        response = requests.post(PROD_AUTH_URL, json=auth_data, headers=headers)
-        response.raise_for_status()
-        print(f"  ✓ Authentication successful")
-        return response.cookies, None
-    except requests.RequestException as e:
-        return None, {
-            'message': 'Failed to authenticate',
-            'code': getattr(response, 'status_code', 0),
-            'error': str(e)
-        }
-
+# ── Local data readers ─────────────────────────────────────────────────────────
 
 def read_local_data_from_db():
-    """Read ALL data from the local SQLite database."""
+    """Read all data from the local SQLite database and return (data, error)."""
     try:
-        from main import app, db
         from model.user import User, Section
         from model.post import Post
         from model.microblog import MicroBlog, Topic
@@ -135,15 +65,12 @@ def read_local_data_from_db():
 
         with app.app_context():
             print("  Reading ALL data from local database...")
-
             all_data = {}
 
-            # 1. Export sections
             sections = Section.query.all()
             all_data['sections'] = [s.read() for s in sections]
             print(f"    Found {len(all_data['sections'])} sections")
 
-            # 2. Export users with their sections
             users = User.query.all()
             all_data['users'] = []
             for user in users:
@@ -152,12 +79,10 @@ def read_local_data_from_db():
                 all_data['users'].append(user_data)
             print(f"    Found {len(all_data['users'])} users")
 
-            # 3. Export topics
             topics = Topic.query.all()
             all_data['topics'] = [t.read() for t in topics]
             print(f"    Found {len(all_data['topics'])} topics")
 
-            # 4. Export microblogs
             microblogs = MicroBlog.query.all()
             all_data['microblogs'] = []
             for mb in microblogs:
@@ -169,7 +94,6 @@ def read_local_data_from_db():
                 all_data['microblogs'].append(mb_data)
             print(f"    Found {len(all_data['microblogs'])} microblogs")
 
-            # 5. Export posts
             posts = Post.query.all()
             all_data['posts'] = []
             for post in posts:
@@ -179,7 +103,6 @@ def read_local_data_from_db():
                 all_data['posts'].append(post_data)
             print(f"    Found {len(all_data['posts'])} posts")
 
-            # 6. Export classrooms
             classrooms = Classroom.query.all()
             all_data['classrooms'] = []
             for classroom in classrooms:
@@ -191,12 +114,10 @@ def read_local_data_from_db():
                 all_data['classrooms'].append(classroom_data)
             print(f"    Found {len(all_data['classrooms'])} classrooms")
 
-            # 7. Export feedback
             feedback_items = Feedback.query.all()
             all_data['feedback'] = [f.read() for f in feedback_items]
             print(f"    Found {len(all_data['feedback'])} feedback records")
 
-            # 8. Export study
             study_records = Study.query.all()
             all_data['study'] = []
             for study in study_records:
@@ -208,20 +129,18 @@ def read_local_data_from_db():
                 all_data['study'].append(study_data)
             print(f"    Found {len(all_data['study'])} study records")
 
-            # 9. Export personas
             personas = Persona.query.all()
             all_data['personas'] = [p.read() for p in personas]
             print(f"    Found {len(all_data['personas'])} personas")
 
-            # 10. Export user_personas
             user_personas = UserPersona.query.all()
             all_data['user_personas'] = []
             for up in user_personas:
                 all_data['user_personas'].append({
-                    'userUid': up.user.uid if up.user else None,
+                    'userUid':      up.user.uid    if up.user    else None,
                     'personaAlias': up.persona.alias if up.persona else None,
-                    'weight': up.weight,
-                    'selectedAt': up.selected_at.isoformat() if up.selected_at else None
+                    'weight':       up.weight,
+                    'selectedAt':   up.selected_at.isoformat() if up.selected_at else None,
                 })
             print(f"    Found {len(all_data['user_personas'])} user-persona associations")
 
@@ -231,259 +150,169 @@ def read_local_data_from_db():
         return None, {'message': f'Failed to read from database: {str(e)}'}
 
 
-def read_local_data(json_file):
-    """Read data from local JSON file (legacy fallback)."""
+def read_local_data_from_json(json_file):
+    """Read data from the JSON fallback file and return (data, error)."""
     if not os.path.exists(json_file):
         return None, {'message': f'JSON file not found: {json_file}'}
 
-    with open(json_file, "r") as f:
+    with open(json_file, 'r') as f:
         data = json.load(f)
 
-    # Handle both old format (list of users) and new format (dict with multiple data types)
     if isinstance(data, list):
-        # Old format: just a list of users
         return {'users': data}, None
-    elif isinstance(data, dict):
-        # New format: dict with multiple data types
+    if isinstance(data, dict):
         return data, None
-    else:
-        return None, {'message': 'Unknown data format in JSON file'}
+    return None, {'message': 'Unknown data format in JSON file'}
 
+# ── Production uploader ────────────────────────────────────────────────────────
 
-def is_default_user(uid):
-    """Check if a user is a default/test user that should be skipped."""
-    return uid in DEFAULT_DATA['users']
-
-def is_default_section(abbreviation):
-    """Check if a section is a default one that should be skipped."""
-    return abbreviation in DEFAULT_DATA['sections']
-
-def is_default_topic(page_path):
-    """Check if a topic is a default one that should be skipped."""
-    return page_path in DEFAULT_DATA['topics']
-
-def filter_default_data(all_data):
-    """Filter out default/test data that gets created by init functions."""
-    filtered = {}
-    
-    # Filter users - exclude default users
-    users = all_data.get('users', [])
-    if users:
-        filtered['users'] = [u for u in users if not is_default_user(u.get('uid'))]
-        skipped = len(users) - len(filtered['users'])
-        if skipped > 0:
-            print(f"  Filtered out {skipped} default users")
-    
-    # Filter sections - exclude default sections
-    sections = all_data.get('sections', [])
-    if sections:
-        filtered['sections'] = [s for s in sections if not is_default_section(s.get('abbreviation'))]
-        skipped = len(sections) - len(filtered['sections'])
-        if skipped > 0:
-            print(f"  Filtered out {skipped} default sections")
-    
-    # Filter topics - exclude default topics
-    topics = all_data.get('topics', [])
-    if topics:
-        page_path_key = 'pagePath' if topics and 'pagePath' in topics[0] else 'page_path'
-        filtered['topics'] = [t for t in topics if not is_default_topic(t.get(page_path_key) or t.get('page_path'))]
-        skipped = len(topics) - len(filtered['topics'])
-        if skipped > 0:
-            print(f"  Filtered out {skipped} default topics")
-    
-    # Filter microblogs - exclude those from default users
-    microblogs = all_data.get('microblogs', [])
-    if microblogs:
-        filtered['microblogs'] = [
-            m for m in microblogs 
-            if not is_default_user(m.get('userUid') or m.get('user', {}).get('uid'))
-        ]
-        skipped = len(microblogs) - len(filtered['microblogs'])
-        if skipped > 0:
-            print(f"  Filtered out {skipped} microblogs from default users")
-    
-    # Filter posts - exclude those from default users
-    posts = all_data.get('posts', [])
-    if posts:
-        filtered['posts'] = [
-            p for p in posts 
-            if not is_default_user(p.get('user', {}).get('uid') if isinstance(p.get('user'), dict) else None)
-        ]
-        skipped = len(posts) - len(filtered['posts'])
-        if skipped > 0:
-            print(f"  Filtered out {skipped} posts from default users")
-    
-    # Copy any other data types unchanged
-    for key in all_data:
-        if key not in filtered:
-            filtered[key] = all_data[key]
-    
-    return filtered
+def _upload_batch(url, data_type, batch, headers, cookies):
+    """POST a single batch; return (imported, failed, errors)."""
+    try:
+        response = requests.post(
+            url,
+            json={data_type: batch},
+            headers=headers,
+            cookies=cookies,
+            timeout=180,
+        )
+        if response.status_code in [200, 201]:
+            stats = response.json().get(data_type, {})
+            return stats.get('imported', 0), stats.get('failed', 0), stats.get('errors', [])
+        return 0, len(batch), [f"HTTP {response.status_code}"]
+    except requests.Timeout:
+        return 0, len(batch), ["Timeout"]
+    except requests.RequestException as e:
+        return 0, len(batch), [str(e)]
 
 
 def import_all_data(all_data, cookies):
-    """
-    Import all data to production using chunked endpoints (one per data type).
-    This avoids timeout issues by making multiple smaller requests.
-    """
-    headers = {
-        "Content-Type": "application/json",
-        "X-Origin": "client"
-    }
+    """Upload all data to production, batching large datasets.
 
-    print("  Using chunked import endpoints (one per data type)...")
-    
+    Returns (success, result_dict).
+    """
+    headers = {"Content-Type": "application/json", "X-Origin": "client"}
     results = {}
-    total_imported = 0
-    total_failed = 0
+    total_imported = total_failed = 0
     failed_endpoints = []
 
     for data_type, endpoint in IMPORT_ENDPOINTS.items():
-        # Get data for this type
         data_list = all_data.get(data_type, [])
-        
-        # Skip if no data for this type
         if not data_list:
             print(f"  Skipping {data_type}: no data")
             continue
 
         url = BASE_URL + endpoint
-        print(f"  Uploading {data_type} ({len(data_list)} records)...", end=" ")
+        use_batching = data_type in LARGE_DATA_TYPES and len(data_list) > BATCH_SIZE
 
-        try:
-            # Send data wrapped in the expected key
-            payload = {data_type: data_list}
-            response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=120)
+        if use_batching:
+            batches = [data_list[i:i + BATCH_SIZE] for i in range(0, len(data_list), BATCH_SIZE)]
+            print(f"  Uploading {data_type} ({len(data_list)} records in batches of {BATCH_SIZE})...")
+            combined = {'imported': 0, 'failed': 0, 'errors': []}
 
-            if response.status_code in [200, 201]:
-                result = response.json()
-                
-                # Extract stats from response
-                stats = result.get(data_type, {})
-                imported = stats.get('imported', 0)
-                failed = stats.get('failed', 0)
-                errors = stats.get('errors', [])
+            for i, batch in enumerate(batches, 1):
+                print(f"    Batch {i}/{len(batches)} ({len(batch)} records)...", end=" ", flush=True)
+                imp, fail, errs = _upload_batch(url, data_type, batch, headers, cookies)
+                combined['imported'] += imp
+                combined['failed']   += fail
+                combined['errors'].extend(errs)
+                status = "✓" if fail == 0 else "⚠"
+                print(f"{status} {imp} imported, {fail} failed")
 
-                results[data_type] = stats
-                total_imported += imported
-                total_failed += failed
+            results[data_type] = combined
+            total_imported += combined['imported']
+            total_failed   += combined['failed']
+            print(f"    Total: {combined['imported']} imported, {combined['failed']} failed")
+            for err in combined['errors'][:3]:
+                print(f"      - {err}")
+            if len(combined['errors']) > 3:
+                print(f"      ... and {len(combined['errors']) - 3} more errors")
 
-                status = "✓" if failed == 0 else "⚠"
-                print(f"{status} {imported} imported, {failed} failed")
-
-                # Show first few errors if any
-                if errors:
-                    for error in errors[:3]:
-                        print(f"      - {error}")
-                    if len(errors) > 3:
-                        print(f"      ... and {len(errors) - 3} more errors")
-            else:
-                print(f"✗ Error {response.status_code}")
-                failed_endpoints.append((data_type, f"Status {response.status_code}"))
-                results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': [f"HTTP {response.status_code}"]}
-                total_failed += len(data_list)
-
-        except requests.Timeout:
-            print(f"✗ Timeout")
-            failed_endpoints.append((data_type, "Request timeout"))
-            results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': ["Timeout"]}
-            total_failed += len(data_list)
-        except requests.RequestException as e:
-            print(f"✗ Error: {e}")
-            failed_endpoints.append((data_type, str(e)))
-            results[data_type] = {'imported': 0, 'failed': len(data_list), 'errors': [str(e)]}
-            total_failed += len(data_list)
+        else:
+            print(f"  Uploading {data_type} ({len(data_list)} records)...", end=" ", flush=True)
+            imp, fail, errs = _upload_batch(url, data_type, data_list, headers, cookies)
+            results[data_type] = {'imported': imp, 'failed': fail, 'errors': errs}
+            total_imported += imp
+            total_failed   += fail
+            status = "✓" if fail == 0 else "⚠"
+            print(f"{status} {imp} imported, {fail} failed")
+            for err in errs[:3]:
+                print(f"      - {err}")
+            if len(errs) > 3:
+                print(f"      ... and {len(errs) - 3} more errors")
+            if fail > 0:
+                failed_endpoints.append((data_type, errs[0] if errs else "unknown"))
 
     print(f"\n  Total: {total_imported} imported, {total_failed} failed")
 
     if failed_endpoints:
         print(f"\n  WARNING: {len(failed_endpoints)} endpoint(s) had issues:")
-        for data_type, error in failed_endpoints:
-            print(f"    - {data_type}: {error}")
+        for dt, err in failed_endpoints:
+            print(f"    - {dt}: {err}")
         return False, {'results': results, 'failed_endpoints': failed_endpoints}
 
     return True, {'results': results}
 
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 60)
     print("Database Restore: SQLite → Production")
     print("=" * 60)
-    
-    # Step 1: Authenticate to production server
+
     print("\n=== Step 1: Authenticating to production server ===")
     cookies, error = authenticate(UID, PASSWORD)
     if error:
         print(f"  ✗ Authentication failed: {error}")
         print("\nPlease check your credentials in app config or environment variables.")
         return 1
-    
-    # Step 2: Read local data from the active database
+
     print("\n=== Step 2: Reading local data from database ===")
     all_data, error = read_local_data_from_db()
     if error:
         print(f"  ✗ Failed to read from database: {error}")
         print("  Trying to read from JSON backup instead...")
-        all_data, error = read_local_data(LOCAL_JSON)
+        all_data, error = read_local_data_from_json(LOCAL_JSON)
         if error:
             print(f"  ✗ Failed to read local data: {error}")
             return 1
-    
-    # Show what we have before filtering
-    print(f"  Found data types (before filtering):")
+
+    print("  Found data types (before filtering):")
     for key, data in all_data.items():
         if data:
-            count = len(data) if isinstance(data, list) else 1
-            print(f"    - {key}: {count} records")
-    
-    # Filter out default/test data
+            print(f"    - {key}: {len(data) if isinstance(data, list) else 1} records")
+
     print("\n=== Filtering out default/test data ===")
     all_data = filter_default_data(all_data)
-    
-    # Show what we have after filtering
-    print(f"\n  Data to upload (after filtering):")
+
+    print("\n  Data to upload (after filtering):")
     for key, data in all_data.items():
         if data:
-            count = len(data) if isinstance(data, list) else 1
-            print(f"    - {key}: {count} records")
-    
-    # Confirm before proceeding
+            print(f"    - {key}: {len(data) if isinstance(data, list) else 1} records")
+
     print("\n⚠️  WARNING: This will upload data to production!")
     print("Do you want to continue? (y/n)")
-    response = input().strip().lower()
-    if response != 'y':
+    if input().strip().lower() != 'y':
         print("Aborted.")
         return 0
 
-    # Step 3: Upload ALL data using chunked import endpoints
     print("\n=== Step 3: Uploading data to production (chunked) ===")
-
     success, result = import_all_data(all_data, cookies)
 
-    if success:
-        print("\n" + "=" * 60)
-        print("✓ Data upload complete!")
-        if 'results' in result:
-            print("\n=== Import Summary ===")
-            for data_type, stats in result['results'].items():
-                imported = stats.get('imported', 0)
-                failed = stats.get('failed', 0)
-                status = "✓" if failed == 0 else "⚠"
-                print(f"  {status} {data_type}: {imported} imported, {failed} failed")
-        print("=" * 60)
-        return 0
-    else:
-        print("\n" + "=" * 60)
-        print("✗ Data upload had failures!")
-        if 'results' in result:
-            print("\n=== Import Summary ===")
-            for data_type, stats in result['results'].items():
-                imported = stats.get('imported', 0)
-                failed = stats.get('failed', 0)
-                status = "✓" if failed == 0 else "✗"
-                print(f"  {status} {data_type}: {imported} imported, {failed} failed")
-        print("=" * 60)
-        return 1
+    print("\n" + "=" * 60)
+    status_icon = "✓" if success else "✗"
+    print(f"{status_icon} Data upload {'complete' if success else 'had failures'}!")
+
+    if 'results' in result:
+        print("\n=== Import Summary ===")
+        for data_type, stats in result['results'].items():
+            imp  = stats.get('imported', 0)
+            fail = stats.get('failed', 0)
+            icon = "✓" if fail == 0 else "✗"
+            print(f"  {icon} {data_type}: {imp} imported, {fail} failed")
+
+    print("=" * 60)
+    return 0 if success else 1
 
 
 if __name__ == "__main__":

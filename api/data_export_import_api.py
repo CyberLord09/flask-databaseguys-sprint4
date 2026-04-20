@@ -648,13 +648,32 @@ class ExportUsers(Resource):
         current_user = g.current_user
         if current_user.role != 'Admin':
             return {'message': 'Admin privileges required'}, 403
-        users = User.query.all()
+
+        # Always use pagination to prevent timeouts
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+
+        # Paginate the query with eager loading to avoid N+1 queries
+        from sqlalchemy.orm import joinedload
+        pagination = User.query.options(joinedload(User.sections)).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+
         result = []
-        for user in users:
+        for user in pagination.items:
             user_data = user.read()
             user_data['sections'] = [s.read() for s in user.sections]
             result.append(user_data)
-        return jsonify({'users': result, 'count': len(result)})
+
+        return jsonify({
+            'users': result,
+            'count': len(result),
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        })
 
 class ExportTopics(Resource):
     @token_required()
@@ -662,8 +681,22 @@ class ExportTopics(Resource):
         current_user = g.current_user
         if current_user.role != 'Admin':
             return {'message': 'Admin privileges required'}, 403
-        topics = Topic.query.all()
-        return jsonify({'topics': [t.read() for t in topics], 'count': len(topics)})
+
+        # Always use pagination to prevent timeouts
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+
+        pagination = Topic.query.paginate(page=page, per_page=per_page, error_out=False)
+
+        return jsonify({
+            'topics': [t.read() for t in pagination.items],
+            'count': len(pagination.items),
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        })
 
 class ExportMicroblogs(Resource):
     @token_required()
@@ -671,16 +704,31 @@ class ExportMicroblogs(Resource):
         current_user = g.current_user
         if current_user.role != 'Admin':
             return {'message': 'Admin privileges required'}, 403
-        microblogs = MicroBlog.query.all()
+
+        # Always use pagination to prevent timeouts
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+
+        pagination = MicroBlog.query.paginate(page=page, per_page=per_page, error_out=False)
+
         result = []
-        for mb in microblogs:
+        for mb in pagination.items:
             mb_data = mb.read()
             if mb.user:
                 mb_data['userUid'] = mb.user.uid
             if mb.topic:
                 mb_data['topicPath'] = mb.topic._page_path
             result.append(mb_data)
-        return jsonify({'microblogs': result, 'count': len(result)})
+
+        return jsonify({
+            'microblogs': result,
+            'count': len(result),
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        })
 
 class ExportPosts(Resource):
     @token_required()
@@ -688,14 +736,29 @@ class ExportPosts(Resource):
         current_user = g.current_user
         if current_user.role != 'Admin':
             return {'message': 'Admin privileges required'}, 403
-        posts = Post.query.all()
+
+        # Always use pagination to prevent timeouts
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+
+        pagination = Post.query.paginate(page=page, per_page=per_page, error_out=False)
+
         result = []
-        for post in posts:
+        for post in pagination.items:
             post_data = post.read()
             if post.user:
                 post_data['userUid'] = post.user.uid
             result.append(post_data)
-        return jsonify({'posts': result, 'count': len(result)})
+
+        return jsonify({
+            'posts': result,
+            'count': len(result),
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        })
 
 class ExportClassrooms(Resource):
     @token_required()
@@ -746,8 +809,22 @@ class ExportPersonas(Resource):
         current_user = g.current_user
         if current_user.role != 'Admin':
             return {'message': 'Admin privileges required'}, 403
-        personas = Persona.query.all()
-        return jsonify({'personas': [p.read() for p in personas], 'count': len(personas)})
+
+        # Always use pagination to prevent timeouts
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+
+        pagination = Persona.query.paginate(page=page, per_page=per_page, error_out=False)
+
+        return jsonify({
+            'personas': [p.read() for p in pagination.items],
+            'count': len(pagination.items),
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        })
 
 class ExportUserPersonas(Resource):
     @token_required()
@@ -755,16 +832,31 @@ class ExportUserPersonas(Resource):
         current_user = g.current_user
         if current_user.role != 'Admin':
             return {'message': 'Admin privileges required'}, 403
-        user_personas = UserPersona.query.all()
+
+        # Always use pagination to prevent timeouts
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+
+        pagination = UserPersona.query.paginate(page=page, per_page=per_page, error_out=False)
+
         result = []
-        for up in user_personas:
+        for up in pagination.items:
             result.append({
                 'userUid': up.user.uid if up.user else None,
                 'personaAlias': up.persona.alias if up.persona else None,
                 'weight': up.weight,
                 'selectedAt': up.selected_at.isoformat() if up.selected_at else None
             })
-        return jsonify({'user_personas': result, 'count': len(result)})
+
+        return jsonify({
+            'user_personas': result,
+            'count': len(result),
+            'total': pagination.total,
+            'page': page,
+            'per_page': per_page,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        })
 
 
 # ============ Chunked Import Endpoints ============

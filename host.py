@@ -29,7 +29,16 @@ import os
 import re
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True, origins='*')
+CORS(app, supports_credentials=True, origins=[
+    "https://pages.opencodingsociety.com",
+    "http://localhost:4100",
+    "http://127.0.0.1:4100",
+    "http://localhost:4500",      # ← Jekyll default port
+    "http://127.0.0.1:4500",
+    "http://localhost:4200",      # ← common fallback
+    "http://127.0.0.1:4200",
+    "null",                       # ← for when the .ipynb is opened directly as a file
+])
 
 api = Api(app)
 
@@ -140,4 +149,4 @@ def say_hello():
     return html_content
 
 if __name__ == '__main__':
-    app.run(port=6741)
+    app.run(port=6741, debug=True)

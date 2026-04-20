@@ -18,3 +18,4 @@ psycopg2-binary
 python_dotenv
 boto3
 deepface
+tf-keras

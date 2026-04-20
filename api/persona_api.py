@@ -569,108 +569,41 @@ class PersonaAPI:
                 'members': members_detail,
                 'evaluation': evaluation
             }, 200
+
     class _FormGroups(Resource):
         def post(self):
-            """Form optimal groups based on personas"""
-            body = request.get_json()
-            
-            user_uids = body.get('user_uids', [])
-            group_size = body.get('group_size', 4)
-            
-            if not user_uids:
-                return {'message': 'user_uids required'}, 400
-            
-            if len(user_uids) < 2:
-                return {'message': 'Need at least 2 users'}, 400
-            
-            # Query using _uid (the actual database column)
-            users = User.query.filter(User._uid.in_(user_uids)).all()
-            
-            if len(users) != len(user_uids):
-                found_uids = {u.uid for u in users}
-                missing_uids = list(set(user_uids) - found_uids)
+            """Form optimal groups based on personas, optionally incorporating prior experiences."""
+            try:
+                body = request.get_json() or {}
+                result = _orchestrate_group_formation(body)
+                return result, 200
+
+            except ValueError as e:
+                error_code = str(e)
+                return {
+                    "message": GROUP_FORMATION_ERRORS.get(error_code, "Invalid request")
+                }, 400
+
+            except LookupError as e:
+                error_data = e.args[0] if e.args else {}
                 return {
                     "message": GROUP_FORMATION_ERRORS["USERS_NOT_FOUND"],
                     "missing_uids": error_data.get("missing_uids", [])
                 }, 404
-            
-            # Create uid->user mapping for quick lookup
-            uid_to_user = {u.uid: u for u in users}
-            
-            # Form groups using randomized search
-            import random
-            
-            best_grouping = None
-            best_avg_score = 0
-            iterations = 50
-            
-            for _ in range(iterations):
-                shuffled = user_uids.copy()
-                random.shuffle(shuffled)
-                
-                groups = []
-                remaining = shuffled.copy()
-                
-                while len(remaining) >= group_size:
-                    group_uids = remaining[:group_size]
-                    
-                    # Get users for this group
-                    group_users = [uid_to_user[uid] for uid in group_uids]
-                    
-                    # Calculate score
-                    group_personas_list = []
-                    for user in group_users:
-                        personas = UserPersona.query.filter_by(user_id=user.id).all()
-                        if personas:
-                            group_personas_list.append(personas)
-                    
-                    score = UserPersona.calculate_team_score(group_personas_list) if group_personas_list else 0.0
-                    
-                    groups.append({
-                        'user_uids': group_uids,
-                        'team_score': score
-                    })
-                    
-                    remaining = remaining[group_size:]
-                
-                # Handle leftovers
-                if remaining:
-                    group_users = [uid_to_user[uid] for uid in remaining]
-                    
-                    group_personas_list = []
-                    for user in group_users:
-                        personas = UserPersona.query.filter_by(user_id=user.id).all()
-                        if personas:
-                            group_personas_list.append(personas)
-                    
-                    score = UserPersona.calculate_team_score(group_personas_list) if group_personas_list else 0.0
-                    
-                    groups.append({
-                        'user_uids': remaining,
-                        'team_score': score
-                    })
-                
-                # Calculate average
-                avg_score = sum(g['team_score'] for g in groups) / len(groups)
-                
-                if avg_score > best_avg_score:
-                    best_avg_score = avg_score
-                    best_grouping = groups
-            
-            return {
-                'groups': best_grouping,
-                'average_score': round(best_avg_score, 2)
-            }, 200    
-        
-    
+
+            except Exception as e:
+                return {
+                    "message": f"Error forming groups: {str(e)}"
+                }, 500
+
     class _UserPersona(Resource):
         @token_required()
         def post(self):
-            """User selects their persona (replaces existing if any)"""
+            """User selects their persona (replaces existing in same category if any)"""
             body = request.get_json()
             persona_id = body.get('persona_id')
             weight = body.get('weight', 1)
-            
+
             if not persona_id:
                 return {'message': 'persona_id is required'}, 400
 
@@ -683,18 +616,28 @@ class PersonaAPI:
             persona = Persona.query.get(persona_id)
             if not persona:
                 return {'message': 'Persona not found'}, 404
-            
+
+            # Get the category of the selected persona
+            category = persona.category
+
             # Check if user already has THIS exact persona
             existing = UserPersona.query.filter_by(
                 user_id=current_user.id,
                 persona_id=persona_id
             ).first()
-            
+
             if existing:
-                return {'message': 'Persona already selected'}, 400
-            
-            UserPersona.query.filter_by(user_id=current_user.id).delete()
-            
+                return {'message': 'Persona already selected'}, 200  # Changed to 200, it's OK
+
+            # Delete any existing persona in the SAME CATEGORY (not all personas)
+            # First get all user's personas
+            user_personas = UserPersona.query.filter_by(user_id=current_user.id).all()
+
+            # Find and delete any in the same category
+            for up in user_personas:
+                if up.persona.category == category:
+                    db.session.delete(up)
+
             # Create new assignment
             user_persona = UserPersona(
                 user=current_user,
@@ -705,22 +648,37 @@ class PersonaAPI:
             try:
                 db.session.add(user_persona)
                 db.session.commit()
-                return {'message': 'Persona selected', 'persona_id': persona_id}, 201
+                return {'message': 'Persona selected', 'persona_id': persona_id, 'category': category}, 201
             except Exception as e:
                 db.session.rollback()
                 return {'message': f'Error: {str(e)}'}, 500
+
     class _GetUserPersonas(Resource):
         @token_required()
         def get(self):
-            """Get current user's personas"""
-            current_user = g.current_user  
+            """Get current user's personas grouped by category"""
+            current_user = g.current_user
             if not current_user:
                 return {'message': 'User not found'}, 404
 
             user_personas = UserPersona.query.filter_by(user_id=current_user.id).all()
-            personas_data = [up.read() for up in user_personas]
-            return {'personas': personas_data}, 200
-    
+
+            # Group personas by category
+            personas_by_category = {}
+            for up in user_personas:
+                category = up.persona.category
+                personas_by_category[category] = {
+                    'persona_id': up.persona_id,
+                    'alias': up.persona.alias,
+                    'weight': up.weight,
+                    'selected_at': up.selected_at.isoformat() if up.selected_at else None
+                }
+
+            return {
+                'personas': personas_by_category,
+                'total_selected': len(personas_by_category)
+            }, 200
+
     class _DeleteUserPersona(Resource):
         @token_required()
         def delete(self, persona_id):

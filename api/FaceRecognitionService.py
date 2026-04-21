@@ -6,12 +6,14 @@ import shutil
 import numpy as np
 import requests
 import json
-from deepface import DeepFace
+import cv2
+from insightface.app import FaceAnalysis
 from flask import current_app, request
 
 class FaceRecognitionService:
     # --- Cache ---
     _embedding_cache = {}  # In-memory cache for base64 -> embedding
+    _face_analyzer = None  # Singleton for InsightFace analyzer
 
     # --- Logic Functions (Atomic) ---
 
@@ -31,24 +33,35 @@ class FaceRecognitionService:
             f.write(image_data)
         return temp_path
 
+    @classmethod
+    def get_analyzer(cls):
+        """Lazy-loads the InsightFace analyzer."""
+        if cls._face_analyzer is None:
+            # name='buffalo_l' is a good balance of speed and accuracy
+            # Use ctx_id=-1 for CPU; change to 0 for GPU if available
+            cls._face_analyzer = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+            cls._face_analyzer.prepare(ctx_id=-1, det_size=(640, 640))
+        return cls._face_analyzer
+
     @staticmethod
     def get_embedding(img_path):
-        """Generates embedding for an image path using VGG-Face."""
+        """Generates embedding for an image path using InsightFace."""
         try:
-            from PIL import Image
-            img = Image.open(img_path)
-            print(f"Analyzing image: {img.size} {img.format}")
+            img = cv2.imread(img_path)
+            if img is None:
+                return None
+                
+            analyzer = FaceRecognitionService.get_analyzer()
+            faces = analyzer.get(img)
             
-            results = DeepFace.represent(img_path=img_path, model_name="VGG-Face", enforce_detection=False)
-            if results and len(results) > 0:
-                embedding = results[0]["embedding"]
-                # Check if embedding is all zeros or too small
-                if all(v == 0 for v in embedding[:10]): # Simple check for empty/failed embedding
-                    print("Warning: DeepFace returned a near-zero embedding. Face might not be detected correctly.")
-                return embedding
+            if faces and len(faces) > 0:
+                # Use the largest face if multiple are detected
+                face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]))[-1]
+                # Return list for JSON serialization
+                return face.normed_embedding.tolist()
             return None
         except Exception as e:
-            print(f"Embedding error: {e}")
+            print(f"InsightFace embedding error: {e}")
             return None
 
     @staticmethod

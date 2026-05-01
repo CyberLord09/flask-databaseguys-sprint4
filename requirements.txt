@@ -20,6 +20,6 @@ boto3
 # ---------------------------------------------------------
 # Face Recognition & ML Dependencies
 # ---------------------------------------------------------
-insightface
-onnxruntime
-opencv-python
+# insightface
+# onnxruntime
+# opencv-python

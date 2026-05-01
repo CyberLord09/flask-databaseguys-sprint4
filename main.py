@@ -32,7 +32,6 @@ from hacks.joke import joke_api  # Import the joke API blueprint
 from api.post import post_api  # Import the social media post API
 from api.profile_game import profile_game_api  # CS Pathway Game profile persistence
 from api.snapshot_proxy import snapshot_proxy
-from api.FaceRecognitionApiController import face_recognition_api_blueprint
 #from api.announcement import announcement_api ##temporary revert
 
 # database Initialization functions
@@ -95,7 +94,6 @@ app.register_blueprint(joke_api)  # Register the joke API blueprint
 app.register_blueprint(post_api)  # Register the social media post API
 app.register_blueprint(profile_game_api)  # CS Pathway Game profile persistence
 app.register_blueprint(snapshot_proxy)  # Register the snapshot proxy API
-app.register_blueprint(face_recognition_api_blueprint)
 # app.register_blueprint(announcement_api) ##temporary revert
 
 # Jokes file initialization
